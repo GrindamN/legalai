@@ -17,17 +17,39 @@ ARG UID=0
 ARG GID=0
 
 ######## WebUI frontend ########
-FROM --platform=$BUILDPLATFORM node:21-alpine3.19 as build
+#FROM --platform=$BUILDPLATFORM node:21-alpine3.19 as build
+#ARG BUILD_HASH
+
+#WORKDIR /app
+
+#COPY package.json package-lock.json ./
+#RUN npm ci
+
+#COPY . .
+#ENV APP_BUILD_HASH=${BUILD_HASH}
+#RUN npm run build
+
+# Base image
+FROM node:21-alpine3.19 as build
 ARG BUILD_HASH
 
 WORKDIR /app
 
+# Copy only package files and install dependencies (for backend if needed)
 COPY package.json package-lock.json ./
 RUN npm ci
 
+# Copy the entire repository (including the prebuilt `build` folder)
 COPY . .
+
+# Instead of running the build, just set the build hash as an environment variable
 ENV APP_BUILD_HASH=${BUILD_HASH}
-RUN npm run build
+
+# No need to run `npm run build`, since we're using the prebuilt files
+# RUN npm run build  <-- remove this line
+
+# Command to start the backend (adjust as per your application)
+CMD ["npm", "start"]
 
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm as base
