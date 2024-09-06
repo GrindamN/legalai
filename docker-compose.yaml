@@ -27,7 +27,7 @@ services:
       - 'WEBUI_SECRET_KEY='
     restart: unless-stopped
     extra_hosts:
-      - host.docker.internal:host-gateway
+      - host.docker.internal
 volumes:
   ollama: {}
   open-webui: {}
