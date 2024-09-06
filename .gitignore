@@ -21,7 +21,6 @@ static/pyodide/*
 
 # Distribution / packaging
 .Python
-build/
 develop-eggs/
 dist/
 downloads/
