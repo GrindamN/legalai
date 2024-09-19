@@ -32,6 +32,27 @@ except ImportError:
     print("dotenv not installed, skipping...")
 
 
+# device type embedding models - "cpu" (default), "cuda" (nvidia gpu required) or "mps" (apple silicon) - choosing this right can lead to better performance
+USE_CUDA = os.environ.get("USE_CUDA_DOCKER", "false")
+
+if USE_CUDA.lower() == "true":
+    try:
+        import torch
+
+        assert torch.cuda.is_available(), "CUDA not available"
+        DEVICE_TYPE = "cuda"
+    except Exception as e:
+        cuda_error = (
+            "Error when testing CUDA but USE_CUDA_DOCKER is true. "
+            f"Resetting USE_CUDA_DOCKER to false: {e}"
+        )
+        os.environ["USE_CUDA_DOCKER"] = "false"
+        USE_CUDA = "false"
+        DEVICE_TYPE = "cpu"
+else:
+    DEVICE_TYPE = "cpu"
+
+
 ####################################
 # LOGGING
 ####################################
@@ -46,6 +67,9 @@ else:
 
 log = logging.getLogger(__name__)
 log.info(f"GLOBAL_LOG_LEVEL: {GLOBAL_LOG_LEVEL}")
+
+if "cuda_error" in locals():
+    log.exception(cuda_error)
 
 log_sources = [
     "AUDIO",
@@ -88,21 +112,9 @@ WEBUI_FAVICON_URL = "https://openwebui.com/favicon.png"
 
 ENV = os.environ.get("ENV", "dev")
 
-PIP_INSTALL = False
-try:
-    importlib.metadata.version("open-webui")
-    PIP_INSTALL = True
-except importlib.metadata.PackageNotFoundError:
-    pass
+FROM_INIT_PY = os.environ.get("FROM_INIT_PY", "False").lower() == "true"
 
-
-PIP_INSTALL = (
-    os.environ.get("PIP_INSTALL", "False").lower() == "true"
-    if os.environ.get("PIP_INSTALL")
-    else PIP_INSTALL
-)
-
-if PIP_INSTALL:
+if FROM_INIT_PY:
     PACKAGE_DATA = {"version": importlib.metadata.version("open-webui")}
 else:
     try:
@@ -193,7 +205,7 @@ WEBUI_BUILD_HASH = os.environ.get("WEBUI_BUILD_HASH", "dev-build")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", BACKEND_DIR / "data")).resolve()
 
-if PIP_INSTALL:
+if FROM_INIT_PY:
     NEW_DATA_DIR = Path(os.getenv("DATA_DIR", OPEN_WEBUI_DIR / "data")).resolve()
     NEW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -210,9 +222,11 @@ if PIP_INSTALL:
     DATA_DIR = Path(os.getenv("DATA_DIR", OPEN_WEBUI_DIR / "data"))
 
 
+FONTS_DIR = Path(os.getenv("FONTS_DIR", OPEN_WEBUI_DIR / "static" / "fonts"))
+
 FRONTEND_BUILD_DIR = Path(os.getenv("FRONTEND_BUILD_DIR", BASE_DIR / "build")).resolve()
 
-if PIP_INSTALL:
+if FROM_INIT_PY:
     FRONTEND_BUILD_DIR = Path(
         os.getenv("FRONTEND_BUILD_DIR", OPEN_WEBUI_DIR / "frontend")
     ).resolve()
@@ -283,3 +297,7 @@ WEBUI_SESSION_COOKIE_SECURE = os.environ.get(
 
 if WEBUI_AUTH and WEBUI_SECRET_KEY == "":
     raise ValueError(ERROR_MESSAGES.ENV_VAR_NOT_FOUND)
+
+ENABLE_WEBSOCKET_SUPPORT = (
+    os.environ.get("ENABLE_WEBSOCKET_SUPPORT", "True").lower() == "true"
+)

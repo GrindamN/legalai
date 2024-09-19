@@ -63,8 +63,8 @@ from open_webui.config import (
     MODEL_FILTER_LIST,
     OAUTH_MERGE_ACCOUNTS_BY_EMAIL,
     OAUTH_PROVIDERS,
+    ENABLE_SEARCH_QUERY,
     SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE,
-    SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD,
     STATIC_DIR,
     TASK_MODEL,
     TASK_MODEL_EXTERNAL,
@@ -109,6 +109,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse, Response, StreamingResponse
 
+from open_webui.utils.security_headers import SecurityHeadersMiddleware
 
 from open_webui.utils.misc import (
     add_or_update_system_message,
@@ -199,9 +200,7 @@ app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE = TITLE_GENERATION_PROMPT_TEMP
 app.state.config.SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE = (
     SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE
 )
-app.state.config.SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD = (
-    SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD
-)
+app.state.config.ENABLE_SEARCH_QUERY = ENABLE_SEARCH_QUERY
 app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE = (
     TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE
 )
@@ -397,8 +396,13 @@ async def chat_completion_tools_handler(
     specs = [tool["spec"] for tool in tools.values()]
     tools_specs = json.dumps(specs)
 
+    if app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE != "":
+        template = app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE
+    else:
+        template = """Available Tools: {{TOOLS}}\nReturn an empty string if no tools match the query. If a function tool matches, construct and return a JSON object in the format {\"name\": \"functionName\", \"parameters\": {\"requiredFunctionParamKey\": \"requiredFunctionParamValue\"}} using the appropriate tool and its parameters. Only return the object and limit the response to the JSON object without additional text."""
+
     tools_function_calling_prompt = tools_function_calling_generation_template(
-        app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE, tools_specs
+        template, tools_specs
     )
     log.info(f"{tools_function_calling_prompt=}")
     payload = get_tools_function_calling_payload(
@@ -583,8 +587,17 @@ class ChatCompletionMiddleware(BaseHTTPMiddleware):
         if len(contexts) > 0:
             context_string = "/n".join(contexts).strip()
             prompt = get_last_user_message(body["messages"])
+
             if prompt is None:
                 raise Exception("No user message found")
+            if (
+                rag_app.state.config.RELEVANCE_THRESHOLD == 0
+                and context_string.strip() == ""
+            ):
+                log.debug(
+                    f"With a 0 relevancy threshold for RAG, the context cannot be empty"
+                )
+
             # Workaround for Ollama 2.0+ system prompt issue
             # TODO: replace with add_or_update_system_message
             if model["owned_by"] == "ollama":
@@ -777,6 +790,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.add_middleware(SecurityHeadersMiddleware)
+
 
 @app.middleware("http")
 async def commit_session_after_request(request: Request, call_next):
@@ -807,6 +822,24 @@ async def update_embedding_function(request: Request, call_next):
     if "/embedding/update" in request.url.path:
         webui_app.state.EMBEDDING_FUNCTION = rag_app.state.EMBEDDING_FUNCTION
     return response
+
+
+@app.middleware("http")
+async def inspect_websocket(request: Request, call_next):
+    if (
+        "/ws/socket.io" in request.url.path
+        and request.query_params.get("transport") == "websocket"
+    ):
+        upgrade = (request.headers.get("Upgrade") or "").lower()
+        connection = (request.headers.get("Connection") or "").lower().split(",")
+        # Check that there's the correct headers for an upgrade, else reject the connection
+        # This is to work around this upstream issue: https://github.com/miguelgrinberg/python-engineio/issues/367
+        if upgrade != "websocket" or "upgrade" not in connection:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Invalid WebSocket upgrade request"},
+            )
+    return await call_next(request)
 
 
 app.mount("/ws", socket_app)
@@ -1312,8 +1345,8 @@ async def get_task_config(user=Depends(get_verified_user)):
         "TASK_MODEL": app.state.config.TASK_MODEL,
         "TASK_MODEL_EXTERNAL": app.state.config.TASK_MODEL_EXTERNAL,
         "TITLE_GENERATION_PROMPT_TEMPLATE": app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE,
+        "ENABLE_SEARCH_QUERY": app.state.config.ENABLE_SEARCH_QUERY,
         "SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE": app.state.config.SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE,
-        "SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD": app.state.config.SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD,
         "TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE": app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
     }
 
@@ -1323,7 +1356,7 @@ class TaskConfigForm(BaseModel):
     TASK_MODEL_EXTERNAL: Optional[str]
     TITLE_GENERATION_PROMPT_TEMPLATE: str
     SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE: str
-    SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD: int
+    ENABLE_SEARCH_QUERY: bool
     TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE: str
 
 
@@ -1337,9 +1370,7 @@ async def update_task_config(form_data: TaskConfigForm, user=Depends(get_admin_u
     app.state.config.SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE = (
         form_data.SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE
     )
-    app.state.config.SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD = (
-        form_data.SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD
-    )
+    app.state.config.ENABLE_SEARCH_QUERY = form_data.ENABLE_SEARCH_QUERY
     app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE = (
         form_data.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE
     )
@@ -1349,7 +1380,7 @@ async def update_task_config(form_data: TaskConfigForm, user=Depends(get_admin_u
         "TASK_MODEL_EXTERNAL": app.state.config.TASK_MODEL_EXTERNAL,
         "TITLE_GENERATION_PROMPT_TEMPLATE": app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE,
         "SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE": app.state.config.SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE,
-        "SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD": app.state.config.SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD,
+        "ENABLE_SEARCH_QUERY": app.state.config.ENABLE_SEARCH_QUERY,
         "TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE": app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
     }
 
@@ -1371,7 +1402,20 @@ async def generate_title(form_data: dict, user=Depends(get_verified_user)):
 
     print(model_id)
 
-    template = app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE
+    if app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE != "":
+        template = app.state.config.TITLE_GENERATION_PROMPT_TEMPLATE
+    else:
+        template = """Create a concise, 3-5 word title with an emoji as a title for the prompt in the given language. Suitable Emojis for the summary can be used to enhance understanding but avoid quotation marks or special formatting. RESPOND ONLY WITH THE TITLE TEXT.
+
+Examples of titles:
+📉 Stock Market Trends
+🍪 Perfect Chocolate Chip Recipe
+Evolution of Music Streaming
+Remote Work Productivity Tips
+Artificial Intelligence in Healthcare
+🎮 Video Game Development Insights
+
+Prompt: {{prompt:middletruncate:8000}}"""
 
     content = title_generation_template(
         template,
@@ -1416,11 +1460,10 @@ async def generate_title(form_data: dict, user=Depends(get_verified_user)):
 @app.post("/api/task/query/completions")
 async def generate_search_query(form_data: dict, user=Depends(get_verified_user)):
     print("generate_search_query")
-
-    if len(form_data["prompt"]) < app.state.config.SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD:
+    if not app.state.config.ENABLE_SEARCH_QUERY:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Skip search query generation for short prompts (< {app.state.config.SEARCH_QUERY_PROMPT_LENGTH_THRESHOLD} characters)",
+            detail=f"Search query generation is disabled",
         )
 
     model_id = form_data["model"]
@@ -1436,11 +1479,24 @@ async def generate_search_query(form_data: dict, user=Depends(get_verified_user)
 
     print(model_id)
 
-    template = app.state.config.SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE
+    if app.state.config.SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE != "":
+        template = app.state.config.SEARCH_QUERY_GENERATION_PROMPT_TEMPLATE
+    else:
+        template = """Given the user's message and interaction history, decide if a web search is necessary. You must be concise and exclusively provide a search query if one is necessary. Refrain from verbose responses or any additional commentary. Prefer suggesting a search if uncertain to provide comprehensive or updated information. If a search isn't needed at all, respond with an empty string. Default to a search query when in doubt. Today's date is {{CURRENT_DATE}}.
+
+User Message:
+{{prompt:end:4000}}
+
+Interaction History:
+{{MESSAGES:END:6}}
+
+Search Query:"""
 
     content = search_query_generation_template(
-        template, form_data["prompt"], {"name": user.name}
+        template, form_data["messages"], {"name": user.name}
     )
+
+    print("content", content)
 
     payload = {
         "model": model_id,
